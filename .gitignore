@@ -1,0 +1,61 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# Publishing policy (see AGENTS.md 4.3)
+#
+# Published: source code, docs, GUI-ready body geometry (cache/*.npz) and
+# deformation maps (ResultsForGUI/*.npz).
+#
+# Not published: anything from the solver (.xplt/.feb/.fsm) and the raw
+# HBM/PPE decks those are built from. The GUI never needs the raw decks at
+# runtime -- cache/*.npz IS the extracted, render-ready body.
+# ---------------------------------------------------------------------------
+
+# Solver inputs/outputs
+*.xplt
+*.feb
+*.fsm
+*.log
+*.out
+
+# Stage 1/2 pipeline scratch outputs (main_1.py / main_2.py): assembled
+# .feb cases, solved node-displacement logs (can be very large -- FEBio's
+# plain-text logfile format is far less compact than .xplt), node-id maps,
+# and their projected-displacement .npz. Entirely regenerable; promote a
+# specific projected_displacement.npz to cases/**/ResultsForGUI/ (see the
+# publishing policy above) if it should ship with the GUI.
+cases_generated/
+
+# Raw model decks (build-time inputs; keep under GUARDS_DATA_ROOT)
+*.k
+*.dyn
+*.inp
+
+# Compiled extensions (e.g. the FEBio Studio fbs bindings)
+*.pyd
+
+# Scratch / solver working dirs
+cases/**/jobs/
+_skipped.*
+lspost.*
+
+# --- Exceptions: the artifacts the GUI actually ships with -----------------
+# Negated after the broad rules above so they win.
+!cache/*.npz
+!cases/**/ResultsForGUI/*.npz
+
+# Test tooling
+.pytest_cache/
+
+# ---------------------------------------------------------------------------
+# Bundled FEBio4 console solver (config/febio_solver.py) -- ~146 MB of
+# third-party redistributable binaries (febio4.exe + its runtime DLLs), not
+# project source. Keep the folder (and its own README.md, which documents
+# how to regenerate it) but never commit the binaries themselves.
+# ---------------------------------------------------------------------------
+febio_bin/*
+!febio_bin/README.md
