@@ -37,13 +37,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
-from app.plate_render import PlateRenderData
-from postprocess.plate_from_feb import read_plate_render_from_feb
+from app.plate_render import PlateRenderData, StrapRenderData
+from postprocess.node_log import read_node_log
+from postprocess.plate_from_feb import ExternallyDrivenPlateError, read_plate_render_from_feb
 from postprocess.project_displacement import project_case_all_steps
+from postprocess.rigid_body_log import read_rigid_body_trajectory
 
 
 @dataclass
@@ -58,15 +60,79 @@ class GuiCaseInfo:
     ppe_key: str
 
 
-def _load_plate_render_sidecar(plate_render_path: Path) -> PlateRenderData:
+def _require_log(path: Path, what: str) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{what} not found at {path} -- solve the case first (FEBio writes it relative to the .feb's folder)."
+        )
+
+
+def _load_plate_render_sidecar(plate_render_path: Path, cases_dir: Path) -> PlateRenderData:
     with np.load(plate_render_path) as data:
+        total_travel_mm = float(data["total_travel_mm"])
+        push_direction = data["push_direction"]
+        trajectory_times = trajectory_offsets = None
+        # Strap/spring-driven plates record their rigid-body log instead of a
+        # travel (see febio.existing_case); the real path only exists after the solve.
+        plate_log_file = str(data["plate_log_file"]) if "plate_log_file" in data.files else ""
+        if plate_log_file:
+            plate_log_path = cases_dir / plate_log_file
+            _require_log(plate_log_path, "plate rigid-body log")
+            trajectory_times, positions = read_rigid_body_trajectory(plate_log_path)
+            trajectory_offsets = positions - positions[0]
+            total_travel_mm = float(np.dot(trajectory_offsets[-1], push_direction))
         return PlateRenderData(
             nodes_rest=data["nodes_rest"],
             boundary_faces=data["boundary_faces"],
-            push_direction=data["push_direction"],
-            total_travel_mm=float(data["total_travel_mm"]),
+            push_direction=push_direction,
+            total_travel_mm=total_travel_mm,
             final_time=float(data["final_time"]),
+            trajectory_times=trajectory_times,
+            trajectory_offsets=trajectory_offsets,
         )
+
+
+def _load_strap_sidecar(plate_render_path: Path, cases_dir: Path) -> Optional[StrapRenderData]:
+    """Strap meshes + their solved displacement, or None if the case has no straps.
+
+    Straps exist only when ``febio.existing_case`` found strap geometry and
+    stored it in the sidecar; any other case returns None.
+    """
+    if not plate_render_path.is_file():
+        return None
+    with np.load(plate_render_path) as data:
+        if "strap_nodes_rest" not in data.files:
+            return None
+        strap_log_ids = data["strap_log_ids"]
+        nodes_rest = data["strap_nodes_rest"]
+        faces = data["strap_faces"]
+        strap_log_path = cases_dir / str(data["strap_log_file"])
+
+    _require_log(strap_log_path, "strap displacement log")
+    steps = read_node_log(strap_log_path)
+    displacement = np.empty((len(steps), len(strap_log_ids), 3), dtype=np.float64)
+    # Rows are keyed by the id FEBio logs (see febio.existing_case.StrapGeometry.log_ids),
+    # not by file order, so match each step's rows to the sidecar's node order.
+    ref_order = np.argsort(strap_log_ids)
+    ref_sorted = strap_log_ids[ref_order]
+    for k, step in enumerate(steps):
+        pos = np.searchsorted(ref_sorted, step.node_ids)
+        matches = len(step.node_ids) == len(ref_sorted) and np.array_equal(
+            ref_sorted[np.clip(pos, 0, len(ref_sorted) - 1)], step.node_ids
+        )
+        if not matches:
+            raise ValueError(
+                f"{strap_log_path}: step {step.step} logs different nodes than the strap set in "
+                f"'{plate_render_path.name}' -- re-run main_1.py and re-solve."
+            )
+        cols = [step.fields.index(c) for c in ("ux", "uy", "uz")]
+        displacement[k][ref_order[pos]] = step.values[:, cols]
+    return StrapRenderData(
+        nodes_rest=nodes_rest,
+        faces=faces,
+        times=np.array([s.time for s in steps], dtype=np.float64),
+        displacement=displacement,
+    )
 
 
 def build_gui_case(case_name: str, cases_dir: Path) -> Path:
@@ -101,9 +167,19 @@ def build_gui_case(case_name: str, cases_dir: Path) -> Path:
         # manual repositioning done in FEBio Studio before solving -- do
         # NOT silently fall back to the (possibly stale) sidecar if this
         # fails; that would defeat the whole point and mask a real bug.
-        plate = read_plate_render_from_feb(feb_path)
+        try:
+            plate = read_plate_render_from_feb(feb_path)
+        except ExternallyDrivenPlateError:
+            # Strap/spring-driven plate: nothing to reconstruct from the .feb,
+            # so use the sidecar main_1.py wrote (rest geometry + pull axis).
+            if not plate_render_path.is_file():
+                raise FileNotFoundError(
+                    f"'{feb_path.name}' drives its plate with straps/springs, so '{plate_render_path.name}' "
+                    f"is required in {cases_dir} (written by main_1.py)."
+                )
+            plate = _load_plate_render_sidecar(plate_render_path, cases_dir)
     elif plate_render_path.is_file():
-        plate = _load_plate_render_sidecar(plate_render_path)
+        plate = _load_plate_render_sidecar(plate_render_path, cases_dir)
     else:
         raise FileNotFoundError(
             f"neither the solved '{feb_path.name}' nor the pre-solve "
@@ -112,11 +188,24 @@ def build_gui_case(case_name: str, cases_dir: Path) -> Path:
         )
 
     multi_step = project_case_all_steps(node_log_path, node_map_path)
+    strap = _load_strap_sidecar(plate_render_path, cases_dir)
 
     with np.load(node_map_path) as data:
         hbm_model_key = str(data["hbm_model_key"])
         site_name = str(data["site_name"])
         ppe_key = str(data["ppe_key"])
+
+    # Optional blocks are written only when present, so older readers and
+    # cases without them see exactly the previous file layout.
+    optional = {}
+    if plate.trajectory_times is not None:
+        optional["plate_traj_times"] = plate.trajectory_times
+        optional["plate_traj_offsets"] = plate.trajectory_offsets
+    if strap is not None:
+        optional["strap_nodes_rest"] = strap.nodes_rest
+        optional["strap_faces"] = strap.faces
+        optional["strap_times"] = strap.times
+        optional["strap_displacement"] = strap.displacement
 
     out_path = cases_dir / f"{case_name}_gui_case.npz"
     np.savez_compressed(
@@ -137,6 +226,7 @@ def build_gui_case(case_name: str, cases_dir: Path) -> Path:
         ppe_key=ppe_key,
         case_name=case_name,
         source_node_log=str(node_log_path),
+        **optional,
     )
     return out_path
 

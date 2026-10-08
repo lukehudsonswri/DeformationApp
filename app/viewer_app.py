@@ -74,7 +74,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from app.gui_case_loader import GuiCase, displacement_at_time, gather_indices_for_target, load_gui_case
 from app.hbm_reader import BodyMesh, TargetRegion, extract_target_region, load_body_mesh
-from app.plate_render import PlateRenderData, plate_points_at_time
+from app.plate_render import PlateRenderData, plate_points_at_time, plate_trajectory_from_npz, strap_points_at_time
 from config.hbm_models import discover_hbm_models
 from config.sites import resolve_site
 from fitting.body_axes import derive_torso_axes
@@ -89,6 +89,7 @@ CASES_DIR = APP_ROOT / "cases_generated"
 SLIDER_STEPS = 1000
 MESH_COLOR = "#d9a679"  # plain "normal" tissue color for the main view
 PLATE_COLOR = "#5a5f66"  # dark metallic gray for the rigid plate
+STRAP_COLOR = "#2f4f8f"  # blue webbing for the straps
 DISPLACEMENT_CMAP = "YlOrRd"  # warm at 0, not the hard-to-see cold blue of turbo/viridis
 INSET_VIEWPORT = (0.02, 0.60, 0.36, 0.98)  # (x0, y0, x1, y1) normalized, top-left
 PLATE_INSET_VIEWPORT = (0.02, 0.02, 0.36, 0.40)  # bottom-left
@@ -234,7 +235,7 @@ class DeformationViewer(QtWidgets.QMainWindow):
         self.inset_mesh: Optional[pv.PolyData] = None
         self.plate_inset_skin_mesh: Optional[pv.PolyData] = None
         self.plate_mesh: Optional[pv.PolyData] = None
-
+        self.strap_mesh: Optional[pv.PolyData] = None
         self.inset_renderer = None
         self.plate_inset_renderer = None
         self._inset_helper_plotter: Optional[pv.Plotter] = None
@@ -388,12 +389,15 @@ class DeformationViewer(QtWidgets.QMainWindow):
         # by postprocess.gui_case.build_gui_case) -- load straight from it
         # rather than re-deriving a separate sidecar path.
         with np.load(info.path) as data:
+            trajectory_times, trajectory_offsets = plate_trajectory_from_npz(data)
             return PlateRenderData(
                 nodes_rest=data["plate_nodes_rest"],
                 boundary_faces=data["plate_boundary_faces"],
                 push_direction=data["push_direction"],
                 total_travel_mm=float(data["total_travel_mm"]),
                 final_time=float(data["final_time"]),
+                trajectory_times=trajectory_times,
+                trajectory_offsets=trajectory_offsets,
             )
 
     def _clear_scene(self) -> None:
@@ -608,6 +612,13 @@ class DeformationViewer(QtWidgets.QMainWindow):
         self.plate_mesh = pv.PolyData(plate_points_at_time(plate, 0.0), plate_faces)
         helper.add_mesh(self.plate_mesh, color=PLATE_COLOR, show_edges=False)
 
+        # Straps only exist for cases whose .feb had strap meshes.
+        self.strap_mesh = None
+        strap = self._current_case.strap
+        if strap is not None:
+            self.strap_mesh = pv.PolyData(strap_points_at_time(strap, 0.0), _quad_faces(strap.faces))
+            helper.add_mesh(self.strap_mesh, color=STRAP_COLOR, show_edges=False)
+
         # _compute_plate_view_camera expects an OUTWARD approach direction
         # (as the original prototype's plate_model.retraction_direction
         # was) -- plate.push_direction is the INTO-body direction (see
@@ -621,7 +632,11 @@ class DeformationViewer(QtWidgets.QMainWindow):
         helper.camera_position = [position, focal_point, up]
         helper.camera.SetParallelProjection(False)
         helper.reset_camera(
-            bounds=_combine_bounds(self.plate_inset_skin_mesh.bounds, self.plate_mesh.bounds)
+            bounds=_combine_bounds(
+                self.plate_inset_skin_mesh.bounds,
+                self.plate_mesh.bounds,
+                *([self.strap_mesh.bounds] if self.strap_mesh is not None else []),
+            )
         )
 
         self.plate_inset_renderer = helper.renderer
@@ -677,7 +692,8 @@ class DeformationViewer(QtWidgets.QMainWindow):
 
         self.plate_inset_skin_mesh.points = new_points
         self.plate_mesh.points = plate_points_at_time(plate, t)
-
+        if self.strap_mesh is not None:
+            self.strap_mesh.points = strap_points_at_time(case.strap, t)
         self.plotter.render()
 
         self.load_label.setText(

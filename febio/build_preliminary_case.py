@@ -79,6 +79,7 @@ def build_case(
     indentation_mm: float = 4.25,
     initial_contact_mm: float = 0.5,
     vertical_offset_mm: float = 0.0,
+    accept_standoff_range_mm: tuple[float, float] | None = None,
     output_path: Path | None = None,
     hbm_root: Path | None = None,
 ) -> Path:
@@ -96,6 +97,11 @@ def build_case(
     two shrank the first step to the tiny seating gap, which never
     registered as engaged contact on the current (unrefined, whole-torso)
     mesh.
+
+    ``accept_standoff_range_mm`` is an optional ``(lo, hi)`` band on the
+    plate's minimum gap to the skin; if the PPE file already sits inside it
+    (and ``vertical_offset_mm`` is 0), the ICP/standoff/symmetry fit is
+    skipped and the plate is used as-is.
     """
     models = discover_hbm_models(hbm_root or (ROOT / "HBM"))
     if hbm_model_key not in models:
@@ -124,10 +130,17 @@ def build_case(
         target_standoff_mm=target_standoff_mm,
         icp_config=ICPConfig(max_iterations=60),
         vertical_offset_mm=vertical_offset_mm,
+        accept_standoff_range_mm=accept_standoff_range_mm,
         body_up_axis=axes.up,
         anterior_axis=axes.anterior,
         lateral_axis=axes.lateral,
     )
+    if seating.fit_skipped:
+        print(
+            f"   plate already at an acceptable standoff (min gap {seating.final_gap.min_mm:.4f}mm, "
+            f"allowed {accept_standoff_range_mm[0]}..{accept_standoff_range_mm[1]}mm) -- "
+            "skipped ICP/standoff/symmetry fit"
+        )
     print(f"   done in {time.time()-t0:.1f}s, final gap min={seating.final_gap.min_mm:.4f}mm")
 
     print("3) extracting torso volume (skin+flesh)...")

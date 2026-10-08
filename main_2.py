@@ -44,7 +44,7 @@ ROOT = Path(__file__).resolve().parent
 # printed "wrote: .../cases_generated/<CASE_NAME>.feb" line. main_2.py finds
 # <CASE_NAME>_node_displacement.txt, _node_map.npz, and _plate_render.npz
 # automatically from this one name.
-CASE_NAME = "F05_Seated_torso_armored_plate_preliminary"
+CASE_NAME = "F05_Standing_strap_fit_pilot"
 
 CASES_DIR = ROOT / "cases_generated"
 # ─────────────────────────────────────────────────────────────────────────────

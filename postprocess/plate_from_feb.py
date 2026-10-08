@@ -58,24 +58,28 @@ def _parse_points(points_el: ET.Element) -> List[Tuple[float, float]]:
     return points
 
 
-def read_plate_render_from_feb(feb_path: Path) -> PlateRenderData:
-    """Reconstruct a ``PlateRenderData`` (rest geometry + prescribed rigid
-    motion) directly from a solved ``.feb`` -- see module docstring.
+class ExternallyDrivenPlateError(ValueError):
+    """The ``.feb``'s rigid plate has no prescribed ``rigid_displacement``
+    drive (e.g. it is pulled by straps/springs instead), so its motion
+    cannot be reconstructed analytically from the file alone.
+    """
+
+
+def find_rigid_plate_elements(root: ET.Element, mesh_el: ET.Element, feb_path: Path) -> Tuple[str, np.ndarray]:
+    """Locate the rigid plate's ``<Elements>`` block and read its connectivity.
+
+    Args:
+        root: parsed ``.feb`` root element.
+        mesh_el: the ``<Mesh>`` element of ``root``.
+        feb_path: path used only in error messages.
+
+    Returns:
+        domain_name: name of the plate's domain / ``<Elements>`` block.
+        elements: (n_elem, 4 or 8) int array of 1-based FEBio node ids.
 
     Raises:
-        ValueError: if any expected element (the ``Elements name="Plate"``
-            block, its node coordinates, the rigid displacement BCs, or
-            their referenced load curve) is missing or malformed -- fails
-            loudly rather than silently falling back to a stale/incorrect
-            geometry.
+        ValueError: if the rigid material, its domain, or its elements are missing.
     """
-    feb_path = Path(feb_path)
-    root = ET.parse(feb_path).getroot()
-
-    mesh_el = root.find("Mesh")
-    if mesh_el is None:
-        raise ValueError(f"{feb_path}: no <Mesh> element found")
-
     # Find the plate's Elements block by its RIGID MATERIAL, not by a
     # hardcoded "Plate" name -- a real wrinkle found testing this directly:
     # opening/re-saving a generated .feb in FEBio Studio renames the
@@ -112,15 +116,30 @@ def read_plate_render_from_feb(feb_path: Path) -> PlateRenderData:
     if plate_elements_el is None:
         raise ValueError(f'{feb_path}: no <Elements name="{plate_domain_name}"> block found')
 
-    plate_hexes_global = np.array(
+    elements = np.array(
         [[int(n) for n in (elem_el.text or "").split(",")] for elem_el in plate_elements_el.findall("elem")],
         dtype=np.int64,
     )  # 1-based FEBio node ids
-    if plate_hexes_global.size == 0:
+    if elements.size == 0:
         raise ValueError(f'{feb_path}: <Elements name="{plate_domain_name}"> has no <elem> entries')
+    return plate_domain_name, elements
 
-    plate_node_ids_global = np.unique(plate_hexes_global)
 
+def read_node_coords(mesh_el: ET.Element, wanted_ids: np.ndarray, feb_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Read the coordinates of ``wanted_ids`` from every ``<Nodes>`` block.
+
+    Args:
+        mesh_el: the ``<Mesh>`` element.
+        wanted_ids: 1-based FEBio node ids to look up.
+        feb_path: path used only in error messages.
+
+    Returns:
+        sorted_ids: (N,) ascending node ids.
+        coords: (N, 3) coordinates in mm, same order as ``sorted_ids``.
+
+    Raises:
+        ValueError: if there is no ``<Nodes>`` block or any id has no coordinates.
+    """
     # A generated .feb writes exactly one <Nodes name="AllNodes"> block, but
     # re-saving it in FEBio Studio can split node coordinates across
     # MULTIPLE <Nodes> blocks -- confirmed directly: Studio moved the
@@ -131,7 +150,7 @@ def read_plate_render_from_feb(feb_path: Path) -> PlateRenderData:
     if not nodes_els:
         raise ValueError(f"{feb_path}: no <Nodes> block found")
 
-    wanted = set(int(x) for x in plate_node_ids_global)
+    wanted = set(int(x) for x in wanted_ids)
     coords_by_id = {}
     for nodes_el in nodes_els:
         for node_el in nodes_el.findall("node"):
@@ -143,12 +162,42 @@ def read_plate_render_from_feb(feb_path: Path) -> PlateRenderData:
     missing = wanted - coords_by_id.keys()
     if missing:
         raise ValueError(
-            f'{feb_path}: {len(missing)} plate node id(s) referenced by <Elements name="{plate_domain_name}"> '
-            f"have no matching <node> entry across any <Nodes> block, e.g. {sorted(missing)[:5]}"
+            f"{feb_path}: {len(missing)} node id(s) have no matching <node> entry "
+            f"across any <Nodes> block, e.g. {sorted(missing)[:5]}"
         )
 
     sorted_ids = np.array(sorted(coords_by_id), dtype=np.int64)
-    nodes_rest = np.array([coords_by_id[int(nid)] for nid in sorted_ids], dtype=np.float64)
+    return sorted_ids, np.array([coords_by_id[int(nid)] for nid in sorted_ids], dtype=np.float64)
+
+
+def read_plate_render_from_feb(feb_path: Path) -> PlateRenderData:
+    """Reconstruct a ``PlateRenderData`` (rest geometry + prescribed rigid
+    motion) directly from a solved ``.feb`` -- see module docstring.
+
+    Raises:
+        ValueError: if any expected element (the ``Elements name="Plate"``
+            block, its node coordinates, the rigid displacement BCs, or
+            their referenced load curve) is missing or malformed -- fails
+            loudly rather than silently falling back to a stale/incorrect
+            geometry.
+    """
+    feb_path = Path(feb_path)
+    root = ET.parse(feb_path).getroot()
+
+    mesh_el = root.find("Mesh")
+    if mesh_el is None:
+        raise ValueError(f"{feb_path}: no <Mesh> element found")
+
+    # A plate pulled by straps/springs has no rigid_displacement drive to
+    # reconstruct, so say so up front (callers fall back to the sidecar).
+    early_rigid_el = root.find("Rigid")
+    if early_rigid_el is not None and not any(
+        bc.get("type") == "rigid_displacement" for bc in early_rigid_el.findall("rigid_bc")
+    ):
+        raise ExternallyDrivenPlateError(f"{feb_path}: rigid plate has no prescribed rigid_displacement drive")
+
+    _, plate_hexes_global = find_rigid_plate_elements(root, mesh_el, feb_path)
+    sorted_ids, nodes_rest = read_node_coords(mesh_el, np.unique(plate_hexes_global), feb_path)
 
     # Dense id -> local (0-based) index lookup, e.g. app.hbm_reader's own
     # node_id_to_index_map pattern -- much faster than a per-element Python

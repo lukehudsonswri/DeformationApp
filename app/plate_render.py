@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -46,6 +47,54 @@ class PlateRenderData:
     push_direction: np.ndarray  # (3,) unit vector, points INTO the body
     total_travel_mm: float
     final_time: float
+    # Solved translation of a strap/spring-driven plate (offset from rest at
+    # each logged time). When set it replaces the straight-line push model.
+    trajectory_times: Optional[np.ndarray] = None  # (K,) ascending
+    trajectory_offsets: Optional[np.ndarray] = None  # (K, 3)
+
+
+@dataclass
+class StrapRenderData:
+    """Deformable strap meshes (e.g. nylon webbing) logged from the solve."""
+
+    nodes_rest: np.ndarray  # (N, 3) rest positions
+    faces: np.ndarray  # (M, 4) 0-based quad indices into nodes_rest
+    times: np.ndarray  # (K,) ascending
+    displacement: np.ndarray  # (K, N, 3)
+
+
+def plate_trajectory_from_npz(data) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Plate trajectory ``(times, offsets)`` from an opened gui-case ``npz``, or ``(None, None)``.
+
+    Args:
+        data: an ``np.load`` result for a ``*_gui_case.npz``.
+
+    Returns:
+        times: (K,) array or None.
+        offsets: (K, 3) array or None.
+    """
+    if "plate_traj_times" not in data.files:
+        return None, None
+    return data["plate_traj_times"], data["plate_traj_offsets"]
+
+
+def strap_from_npz(data) -> Optional[StrapRenderData]:
+    """``StrapRenderData`` from an opened gui-case ``npz``, or None if it has no straps.
+
+    Args:
+        data: an ``np.load`` result for a ``*_gui_case.npz``.
+
+    Returns:
+        The strap meshes and their solved displacement, or None.
+    """
+    if "strap_nodes_rest" not in data.files:
+        return None
+    return StrapRenderData(
+        nodes_rest=data["strap_nodes_rest"],
+        faces=data["strap_faces"],
+        times=data["strap_times"],
+        displacement=data["strap_displacement"],
+    )
 
 
 def load_plate_render(path: Path) -> PlateRenderData:
@@ -61,6 +110,29 @@ def load_plate_render(path: Path) -> PlateRenderData:
 
 def plate_points_at_time(plate: PlateRenderData, t: float) -> np.ndarray:
     """The plate's node positions at load-curve time ``t``."""
+    if plate.trajectory_times is not None:
+        offset = np.array([np.interp(t, plate.trajectory_times, plate.trajectory_offsets[:, i]) for i in range(3)])
+        return plate.nodes_rest + offset
     load_fraction = float(np.clip(t, 0.0, 1.0))
     offset = plate.push_direction * (plate.total_travel_mm * load_fraction)
     return plate.nodes_rest + offset
+
+
+def strap_points_at_time(strap: StrapRenderData, t: float) -> np.ndarray:
+    """Strap node positions (N, 3) at time ``t``, linearly interpolated between solved steps.
+
+    Args:
+        strap: strap meshes and their solved displacement.
+        t: solver time (clamped to the solved range, never extrapolated).
+
+    Returns:
+        (N, 3) positions in mm.
+    """
+    t = float(np.clip(t, strap.times[0], strap.times[-1]))
+    idx = int(np.searchsorted(strap.times, t))
+    if idx <= 0:
+        return strap.nodes_rest + strap.displacement[0]
+    t0, t1 = strap.times[idx - 1], strap.times[idx]
+    frac = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+    disp = strap.displacement[idx - 1] * (1.0 - frac) + strap.displacement[idx] * frac
+    return strap.nodes_rest + disp

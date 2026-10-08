@@ -12,10 +12,12 @@ of curvature).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Tuple
 
 import numpy as np
 
 from core.mesh.base import SurfaceMesh
+from core.mesh.signed_distance import SignedGapResult, signed_gap_to_surface
 
 # AGENTS.md section 2.4: measured torso radius of curvature used for the
 # sagitta estimate. This is a property of human torso anatomy at the scale
@@ -78,3 +80,40 @@ def resolve_target_standoff(
             f"sagitta {floor.sagitta_mm:.4f}mm) -- raising to the floor"
         )
     return floor.floor_mm
+
+
+@dataclass
+class StandoffCheck:
+    """Result of ``check_standoff``: the measured gap and whether it is
+    already inside the acceptable band (so no re-fit is needed).
+    """
+
+    gap: SignedGapResult
+    min_ok_mm: float
+    max_ok_mm: float
+    is_acceptable: bool
+
+
+def check_standoff(
+    concave_points: np.ndarray,
+    body_surface: SurfaceMesh,
+    acceptable_range_mm: Tuple[float, float],
+) -> StandoffCheck:
+    """Decide whether a plate is already at a usable standoff from the body.
+
+    Uses the same measure ``seat_plate`` drives to its target: the minimum
+    signed point-to-face gap of the plate's body-facing surface.
+
+    Args:
+        concave_points: (N, 3) body-facing plate surface points in mm.
+        body_surface: skin ``SurfaceMesh`` with outward-facing normals.
+        acceptable_range_mm: (lo, hi) inclusive band for the minimum signed
+            gap -- ``lo`` bounds penetration, ``hi`` bounds how far off the
+            skin the plate may sit.
+
+    Returns:
+        ``StandoffCheck`` carrying the full gap result and the verdict.
+    """
+    lo, hi = acceptable_range_mm
+    gap = signed_gap_to_surface(concave_points, body_surface)
+    return StandoffCheck(gap=gap, min_ok_mm=lo, max_ok_mm=hi, is_acceptable=lo <= gap.min_mm <= hi)

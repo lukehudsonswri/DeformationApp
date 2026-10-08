@@ -73,7 +73,7 @@ from core.mesh.signed_distance import SignedGapResult, signed_gap_to_surface
 from core.registration.point_to_plane_icp import ICPConfig, ICPResult, point_to_plane_icp
 from fitting.body_surface import extract_skin_surface
 from fitting.plate_signature import PlateOrientation, compute_plate_orientation
-from fitting.standoff import StandoffFloor, compute_standoff_floor, resolve_target_standoff
+from fitting.standoff import StandoffFloor, check_standoff, compute_standoff_floor, resolve_target_standoff
 
 # F05_Standing export frame convention (AGENTS.md 2.1): superior is -Z. This
 # is a property of the *export frame*, not the anatomy -- re-derive (don't
@@ -117,6 +117,7 @@ class SeatingResult:
     symmetry_twist_deg: float  # de-twist rotation applied by the symmetry stage (0.0 if disabled)
     symmetry_lateral_shift_mm: float  # lateral recentering applied by the symmetry stage (0.0 if disabled)
     symmetry_yaw_deg: float  # rim-vector yaw correction applied by the symmetry stage (0.0 if disabled)
+    fit_skipped: bool = False  # True when the plate already had an acceptable standoff and was left untouched
 
 
 def _mean_nearest_dist(points: np.ndarray, target: np.ndarray) -> float:
@@ -634,6 +635,7 @@ def seat_plate(
     vertical_offset_mm: float = 0.0,
     enforce_symmetry: bool = True,
     target_lateral_mm: Optional[float] = None,
+    accept_standoff_range_mm: Optional[Tuple[float, float]] = None,
 ) -> SeatingResult:
     """Rigidly seat ``ppe_spec`` (a rigid plate) against ``site`` in
     ``model``, at ``target_standoff_mm`` outward from the skin.
@@ -701,6 +703,14 @@ def seat_plate(
     for the full rationale and method). Set to ``False`` to reproduce the
     pre-symmetry-correction seating exactly (e.g. for comparing against
     older cases, or a PPE that is intentionally meant to sit off-center).
+
+    ``accept_standoff_range_mm`` (default ``None`` = always fit) is a
+    ``(lo, hi)`` band for the plate's minimum signed gap to the skin. If the
+    PPE as loaded already sits inside it, seating (seed rotation, ICP,
+    standoff and symmetry correction) is skipped entirely and the plate is
+    returned untouched with ``fit_skipped=True``. Ignored when
+    ``vertical_offset_mm`` is non-zero, since that is an explicit request to
+    move the plate.
     """
     if not ppe_spec.is_rigid:
         raise NotImplementedError(
@@ -720,6 +730,34 @@ def seat_plate(
 
     current_full = plate_mesh.nodes.copy()
     concave_ids = orient.concave_face_node_ids
+
+    if accept_standoff_range_mm is not None and vertical_offset_mm == 0.0:
+        existing = check_standoff(current_full[concave_ids], body_surface, accept_standoff_range_mm)
+        if existing.is_acceptable:
+            identity = np.eye(3)
+            return SeatingResult(
+                plate_orientation=orient,
+                body_surface=body_surface,
+                offset_target_points=offset_points,
+                seed_rotation=identity,
+                icp_result=ICPResult(
+                    transformed_points=current_full[concave_ids],
+                    rotation=identity,
+                    translation=np.zeros(3),
+                    iterations=0,
+                    converged=True,
+                    final_mean_dist_mm=existing.gap.mean_mm,
+                ),
+                transformed_plate_nodes=current_full,
+                pre_icp_mean_dist_mm=existing.gap.mean_mm,
+                standoff_floor=standoff_floor,
+                resolved_target_standoff_mm=resolved_standoff_mm,
+                final_gap=existing.gap,
+                symmetry_twist_deg=0.0,
+                symmetry_lateral_shift_mm=0.0,
+                symmetry_yaw_deg=0.0,
+                fit_skipped=True,
+            )
 
     # Rim indices for the yaw-correction stage (_apply_symmetry_correction)
     # -- computed once, in the plate's own local/untransformed frame, since

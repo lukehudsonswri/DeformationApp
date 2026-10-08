@@ -14,8 +14,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
+
+from app.plate_render import StrapRenderData, strap_from_npz
 
 
 @dataclass
@@ -33,6 +36,7 @@ class GuiCase:
     push_direction: np.ndarray
     total_travel_mm: float
     final_time: float
+    strap: Optional[StrapRenderData] = None  # only for cases whose .feb has strap meshes
 
 
 def load_gui_case(path: Path) -> GuiCase:
@@ -49,6 +53,7 @@ def load_gui_case(path: Path) -> GuiCase:
             push_direction=data["push_direction"],
             total_travel_mm=float(data["total_travel_mm"]),
             final_time=float(data["final_time"]),
+            strap=strap_from_npz(data),
         )
 
 

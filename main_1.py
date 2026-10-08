@@ -11,17 +11,34 @@ Studio (or ``febio4.exe``) yourself -- once you have a solved case, run
 ``main_2.py`` to project the resulting deformation onto the full HBM model
 for viewing in the GUI (``app/viewer_app.py``).
 
+If the plate is already at an acceptable standoff from the torso
+(``ACCEPTABLE_STANDOFF_MM``) no ICP/CPD re-fit is done. To use a ``.feb``
+built outside this script, set ``EXISTING_FEB_PATH``: the same standoff check
+runs, then the displacement logfile entries and the ``_node_map.npz`` /
+``_plate_render.npz`` sidecars ``main_2.py`` needs are added next to it.
+
 See AGENTS.md for the full pipeline design and VERIFICATION.md for how
 results are checked.
 """
 from pathlib import Path
 
 from febio.build_preliminary_case import build_case
+from febio.existing_case import prepare_existing_case
 
 # ─── USER SETTINGS ──────────────────────────────────────────────────────────
-HBM_MODEL_KEY = "F05_Seated"   # folder name under HBM/ -- see config/hbm_models.py
+HBM_MODEL_KEY = "F05_Standing"   # folder name under HBM/ -- see config/hbm_models.py
 SITE = "torso"                   # only "torso" exists today -- see config/sites.py
 PPE_KEY = "armored_plate"        # see config/ppe.py for the registry
+
+# A .feb that already exists (e.g. hand-built with straps) to prepare for
+# main_2.py instead of generating a new one. None = build a new case.
+EXISTING_FEB_PATH = Path("cases_generated/F05_Standing_strap_fit_pilot.feb")
+
+# The plate counts as already well placed -- and is NOT re-fit with ICP -- if
+# its minimum gap to the skin lies in this (lo, hi) range, in mm. lo bounds
+# penetration, hi bounds how far off the skin it may sit. A plate outside the
+# range is re-fit (new case) or rejected (EXISTING_FEB_PATH).
+ACCEPTABLE_STANDOFF_MM = (0.0, 1.0)
 
 INDENTATION_MM = 8            # how far the PPE presses in past first contact
 TARGET_STANDOFF_MM = 0.1         # rest gap for contact detection (AGENTS.md 2.4).
@@ -47,6 +64,17 @@ HBM_ROOT = Path("HBM")
 
 
 def main() -> None:
+    if EXISTING_FEB_PATH is not None:
+        prepare_existing_case(
+            feb_path=EXISTING_FEB_PATH,
+            hbm_model_key=HBM_MODEL_KEY,
+            site_name=SITE,
+            ppe_key=PPE_KEY,
+            acceptable_standoff_range_mm=ACCEPTABLE_STANDOFF_MM,
+            hbm_root=HBM_ROOT,
+        )
+        return
+
     build_case(
         hbm_model_key=HBM_MODEL_KEY,
         site_name=SITE,
@@ -55,6 +83,7 @@ def main() -> None:
         indentation_mm=INDENTATION_MM,
         initial_contact_mm=INITIAL_CONTACT_MM,
         vertical_offset_mm=VERTICAL_OFFSET_MM,
+        accept_standoff_range_mm=ACCEPTABLE_STANDOFF_MM,
         output_path=OUTPUT_PATH,
         hbm_root=HBM_ROOT,
     )
